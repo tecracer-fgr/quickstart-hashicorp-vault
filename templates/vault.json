@@ -112,7 +112,7 @@
         "Vault1MemoryAlarm": {
             "Type": "AWS::CloudWatch::Alarm",
             "Properties": {
-                "AlarmDescription": "CPU alarm for my instance",
+                "AlarmDescription": "Memory alarm for my instance",
                 "AlarmActions": [{
                     "Ref": "VaultSNSTopic"
                 }],
@@ -131,10 +131,10 @@
                 }]
             }
         },
-        "Vault1MemoryAlarm": {
+        "Vault2MemoryAlarm": {
             "Type": "AWS::CloudWatch::Alarm",
             "Properties": {
-                "AlarmDescription": "CPU alarm for my instance",
+                "AlarmDescription": "Memory alarm for my instance",
                 "AlarmActions": [{
                     "Ref": "VaultSNSTopic"
                 }],
@@ -214,6 +214,85 @@
         },
         "vault1": {
             "Type": "AWS::EC2::Instance",
+            "Metadata": {
+                "AWS::CloudFormation::Init": {
+                    "configSets": {
+                        "vault_install": [ "install_cloudwatch_logs_and_mon_scripts", "install_vault", "run_vault" ]
+                    },
+                    "install_cloudwatch_logs_and_mon_scripts": {
+                        "packages": {
+                            "apt": {
+                                "unzip": [],
+                                "libwww-perl": [],
+                                "libdatetime-perl": []
+                            }
+                        },
+                        "sources": {
+                            "/usr/local": "http://aws-cloudwatch.s3.amazonaws.com/downloads/CloudWatchMonitoringScripts-1.2.1.zip"
+                        },
+                        "files": {
+                            "/etc/cron.hourly/cloudwatch-monitoring": {
+                                "content": [ "*/5 * * * * /usr/local/aws-scripts-mon/mon-put-instance-data.pl --mem-util --mem-used --from-cron" ],
+                                "mode": "000700",
+                                "owner": "root",
+                                "group": "root"
+                            },
+                            "/usr/local/awslogs-agent-setup.py": {
+                                "source": "https://s3.amazonaws.com/aws-cloudwatch/downloads/latest/awslogs-agent-setup.py",
+                                "mode": "000700",
+                                "owner": "root",
+                                "group": "root"
+                            }
+                        },
+                        "commands": {
+                            "01_run_awslogs_agent_setup.py": {
+                                "command": {
+                                    "Fn::Sub": ["python /usr/local/awslogs-agent-setup.py -n -r ${Region} -c https://s3-us-west-2.amazonaws.com/43d3.brandonchav.is/vault/awslogs-config-file", {
+                                        "Region": {
+                                            "Ref": "AWS::Region"
+                                        }
+                                    }]
+                                }
+                            },
+                            "02_make_mon_put_instance_data_exececutable": {
+                                "command": "chmod +x /usr/local/aws-scripts-mon/mon-put-instance-data.pl"
+                            }
+                        }
+                    },
+                    "install_vault": {
+                        "sources": {
+                            "/usr/local/bin": "https://releases.hashicorp.com/vault/0.6.1/vault_0.6.1_linux_amd64.zip"
+                        },
+                        "files": {
+                            "/etc/vault.d/vault.hcl": {
+                                "source": "https://s3-us-west-2.amazonaws.com/43d3.brandonchav.is/vault/vault.hcl",
+                                "mode": "000700",
+                                "owner": "root",
+                                "group": "root"
+                            },
+                            "/etc/init/vault-upstart.conf": {
+                                "source": "https://s3-us-west-2.amazonaws.com/43d3.brandonchav.is/vault/vault-upstart.conf",
+                                "mode": "000700",
+                                "owner": "root",
+                                "group": "root"
+                            }
+                        },
+                        "commands": {
+                            "01_chmod_and_chown_vault": {
+                                "command": "chmod 0755 /usr/local/bin/vault && chown root:root /usr/local/bin/vault",
+                            }
+                        }
+                    },
+                    "run_vault": {
+                        "commands": {
+                            "01_run_vault_binary": {
+                                "command": "vault server -config /etc/vault.d/vault.hcl",
+                                "cwd": "/usr/local/bin/"
+                            }
+                        }
+                    }
+                }
+            },
             "Properties": {
                 "AvailabilityZone": {
                     "Fn::Select": [
@@ -249,27 +328,33 @@
                     "Fn::Base64": {
                         "Fn::Join": [
                             "", [
-                              "#!/bin/bash -e\n",
-                              "sudo apt-get -y update\n",
-                              "sudo apt-get -y install unzip\n",
-                              "sudo apt-get -y install libwww-perl libdatetime-perl\n",
-                              "#installing additional cloudwatch mon-scripts\n",
-                              "curl http://aws-cloudwatch.s3.amazonaws.com/downloads/CloudWatchMonitoringScripts-1.2.1.zip -O\n",
-                              "unzip -d /usr/local /CloudWatchMonitoringScripts-1.2.1.zip\n",
-                              "rm CloudWatchMonitoringScripts-1.2.1.zip\n",
-                              "mkdir -p /etc/cron.hourly && touch /etc/cron.hourly/cloudwatch-monitoring && chmod 700 /etc/cron.hourly/cloudwatch-monitoring\n",
-                              "echo \"*/5 * * * * /usr/local/aws-scripts-mon/mon-put-instance-data.pl --mem-util --mem-used --from-cron\" >> /etc/cron.hourly/cloudwatch-monitoring\n",
-                              "#installing the cloudwatch logs agent\n",
-                              "curl https://s3.amazonaws.com/aws-cloudwatch/downloads/latest/awslogs-agent-setup.py -O\n",
-                              "chmod +x ./awslogs-agent-setup.py\n",
-                              "./awslogs-agent-setup.py -n -r ", {
-                                  "Ref": "AWS::Region"
-                              },
-                              " -c s3://myawsbucket/my-config-file\n",
-                              "#need the following two files in the QS s3 bucket:",
-                              "wget vault-boostrap.sh\n",
-                              "wget vault-upstart.conf && mv vault-upstart.conf /etc/init/vault-upstart.conf",
-                              "#TODO: point Vault conf file at Consul master https://www.vaultproject.io/docs/config/index.html"
+                                "#!/bin/bash -e\n",
+                                "mkdir -p /opt/vault/policies/ /opt/vault/scripts/ /etc/vault.d/\n",
+                                "apt-get -y update\n",
+                                "#install the cfn-init tools\n",
+                                "apt-get -y install python-pip\n",
+                                "pip install pyOpenSSL ndg-httpsclient pyasn1\n",
+                                "easy_install https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-latest.tar.gz\n",
+                                "ln -s /root/aws-cfn-bootstrap-latest/init/ubuntu/cfn-hup /etc/init.d/cfn-hup\n",
+                                "/usr/local/bin/cfn-init",
+                                " --verbose ",
+                                " --stack ", {
+                                    "Ref": "AWS::StackName"
+                                },
+                                " --resource vault1",
+                                " --configsets vault_install",
+                                " --region ", {
+                                    "Ref": "AWS::Region"
+                                }, "\n",
+
+                                "/usr/local/bin/cfn-signal -e $? ",
+                                "  --stack ", {
+                                    "Ref": "AWS::StackName"
+                                },
+                                " --resource vault1 ",
+                                " --region ", {
+                                    "Ref": "AWS::Region"
+                                }, "\n"
                             ]
                         ]
                     }
@@ -324,6 +409,85 @@
         },
         "vault2": {
             "Type": "AWS::EC2::Instance",
+            "Metadata": {
+                "AWS::CloudFormation::Init": {
+                    "configSets": {
+                        "vault_install": ["install_cloudwatch_logs_and_mon_scripts", "install_vault", "run_vault"]
+                    },
+                    "install_cloudwatch_logs_and_mon_scripts": {
+                        "packages": {
+                            "apt": {
+                                "unzip": [],
+                                "libwww-perl": [],
+                                "libdatetime-perl": []
+                            }
+                        },
+                        "sources": {
+                            "/usr/local": "http://aws-cloudwatch.s3.amazonaws.com/downloads/CloudWatchMonitoringScripts-1.2.1.zip"
+                        },
+                        "files": {
+                            "/etc/cron.hourly/cloudwatch-monitoring": {
+                                "content": [ "*/5 * * * * /usr/local/aws-scripts-mon/mon-put-instance-data.pl --mem-util --mem-used --from-cron" ],
+                                "mode": "000700",
+                                "owner": "root",
+                                "group": "root"
+                            },
+                            "/usr/local/awslogs-agent-setup.py": {
+                                "source": "https://s3.amazonaws.com/aws-cloudwatch/downloads/latest/awslogs-agent-setup.py",
+                                "mode": "000700",
+                                "owner": "root",
+                                "group": "root"
+                            }
+                        },
+                        "commands": {
+                            "01_run_awslogs_agent_setup.py": {
+                                "command": {
+                                    "Fn::Sub": ["python /usr/local/awslogs-agent-setup.py -n -r ${Region} -c https://s3-us-west-2.amazonaws.com/43d3.brandonchav.is/vault/awslogs-config-file", {
+                                        "Region": {
+                                            "Ref": "AWS::Region"
+                                        }
+                                    }]
+                                }
+                            },
+                            "02_make_mon_put_instance_data_exececutable": {
+                                "command": "chmod +x /usr/local/aws-scripts-mon/mon-put-instance-data.pl"
+                            }
+                        }
+                    },
+                    "install_vault": {
+                        "sources": {
+                            "/usr/local/bin": "https://releases.hashicorp.com/vault/0.6.1/vault_0.6.1_linux_amd64.zip"
+                        },
+                        "files": {
+                            "/etc/vault.d/vault.hcl": {
+                                "source": "https://s3-us-west-2.amazonaws.com/43d3.brandonchav.is/vault/vault.hcl",
+                                "mode": "000700",
+                                "owner": "root",
+                                "group": "root"
+                            },
+                            "/etc/init/vault-upstart.conf": {
+                                "source": "https://s3-us-west-2.amazonaws.com/43d3.brandonchav.is/vault/vault-upstart.conf",
+                                "mode": "000700",
+                                "owner": "root",
+                                "group": "root"
+                            }
+                        },
+                        "commands": {
+                            "01_chmod_and_chown_vault": {
+                                "command": "chmod 0755 /usr/local/bin/vault && chown root:root /usr/local/bin/vault",
+                            }
+                        }
+                    },
+                    "run_vault": {
+                        "commands": {
+                            "01_run_vault_binary": {
+                                "command": "vault server -config /etc/vault.d/vault.hcl",
+                                "cwd": "/usr/local/bin/"
+                            }
+                        }
+                    }
+                }
+            },
             "Properties": {
                 "AvailabilityZone": {
                     "Fn::Select": [
@@ -360,26 +524,32 @@
                         "Fn::Join": [
                             "", [
                                 "#!/bin/bash -e\n",
-                                "sudo apt-get -y update\n",
-                                "sudo apt-get -y install unzip\n",
-                                "sudo apt-get -y install libwww-perl libdatetime-perl\n",
-                                "#installing additional cloudwatch mon-scripts\n",
-                                "curl http://aws-cloudwatch.s3.amazonaws.com/downloads/CloudWatchMonitoringScripts-1.2.1.zip -O\n",
-                                "unzip -d /usr/local /CloudWatchMonitoringScripts-1.2.1.zip\n",
-                                "rm CloudWatchMonitoringScripts-1.2.1.zip\n",
-                                "mkdir -p /etc/cron.hourly && touch /etc/cron.hourly/cloudwatch-monitoring && chmod 700 /etc/cron.hourly/cloudwatch-monitoring\n",
-                                "echo \"*/5 * * * * /usr/local/aws-scripts-mon/mon-put-instance-data.pl --mem-util --mem-used --from-cron\" >> /etc/cron.hourly/cloudwatch-monitoring\n",
-                                "#installing the cloudwatch logs agent\n",
-                                "curl https://s3.amazonaws.com/aws-cloudwatch/downloads/latest/awslogs-agent-setup.py -O\n",
-                                "chmod +x ./awslogs-agent-setup.py\n",
-                                "./awslogs-agent-setup.py -n -r ", {
-                                    "Ref": "AWS::Region"
+                                "mkdir -p /opt/vault/policies/ /opt/vault/scripts/ /etc/vault.d/\n",
+                                "apt-get -y update\n",
+                                "#install the cfn-init tools\n",
+                                "apt-get -y install python-pip\n",
+                                "pip install pyOpenSSL ndg-httpsclient pyasn1\n",
+                                "easy_install https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-latest.tar.gz\n",
+                                "ln -s /root/aws-cfn-bootstrap-latest/init/ubuntu/cfn-hup /etc/init.d/cfn-hup\n",
+                                "/usr/local/bin/cfn-init",
+                                " --verbose ",
+                                " --stack ", {
+                                    "Ref": "AWS::StackName"
                                 },
-                                " -c s3://myawsbucket/my-config-file\n",
-                                "#need the following two files in the QS s3 bucket:",
-                                "wget vault-boostrap.sh\n",
-                                "wget vault-upstart.conf && mv vault-upstart.conf /etc/init/vault-upstart.conf",
-                                "#TODO: point Vault conf file at Consul master https://www.vaultproject.io/docs/config/index.html"
+                                " --resource vault2",
+                                " --configsets vault_install",
+                                " --region ", {
+                                    "Ref": "AWS::Region"
+                                }, "\n",
+
+                                "/usr/local/bin/cfn-signal -e $? ",
+                                " --stack ", {
+                                    "Ref": "AWS::StackName"
+                                },
+                                "  --resource vault2 ",
+                                "  --region ", {
+                                    "Ref": "AWS::Region"
+                                }, "\n"
                             ]
                         ]
                     }
@@ -447,4 +617,4 @@
             }
         }
     }
-    }
+}
